@@ -23,6 +23,10 @@ WORKDIR /app
 COPY A2UI/samples/agent/adk/restaurant_finder /app/A2UI/samples/agent/adk/restaurant_finder
 COPY A2UI/samples/agent/adk/_shared           /app/A2UI/samples/agent/adk/_shared
 COPY A2UI/agent_sdks/python                   /app/A2UI/agent_sdks/python
+# a2ui-agent-sdk's build hook walks up from its source dir looking for a
+# sibling `specification/` directory at the repo root. Without it, uv sync
+# fails with "Could not find repository root".
+COPY A2UI/specification                       /app/A2UI/specification
 
 # Working directory is the restaurant_finder folder so relative paths
 # (restaurant_data.json, images/) resolve.

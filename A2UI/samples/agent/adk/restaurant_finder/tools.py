@@ -27,6 +27,13 @@ def get_restaurants(
   """Call this tool to get a list of restaurants based on a cuisine and location.
   'count' is the number of restaurants to return.
   """
+  # Some free-tier tool models (NVIDIA Llama 3.3 70B in particular) emit
+  # int arguments as JSON strings. Coerce defensively so all_items[:count]
+  # below doesn't TypeError when the model picks the route.
+  try:
+    count = int(count)
+  except (TypeError, ValueError):
+    count = 5
   logger.info(f"--- TOOL CALLED: get_restaurants (count: {count}) ---")
   logger.info(f"  - Cuisine: {cuisine}")
   logger.info(f"  - Location: {location}")

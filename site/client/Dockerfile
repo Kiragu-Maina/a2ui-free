@@ -6,8 +6,14 @@ WORKDIR /app
 
 # Workspace deps: shell -> @a2ui/lit -> @a2ui/web_core / markdown-it.
 # Preserving the relative path layout so the file:../../ specifiers in
-# package.json resolve without sed.
+# package.json resolve without sed. The lit samples ship as an npm workspace
+# (package.json with workspaces: [custom-components-example, shell]) so we
+# copy the workspace root + both sibling packages and run npm install once
+# at the root; shell's imports from custom-components-example/ resolve via
+# the hoisted node_modules tree.
 COPY A2UI/renderers                            /app/renderers
+COPY A2UI/samples/client/lit/package.json      /app/samples/client/lit/package.json
+COPY A2UI/samples/client/lit/package-lock.json /app/samples/client/lit/package-lock.json
 COPY A2UI/samples/client/lit/shell             /app/samples/client/lit/shell
 COPY A2UI/samples/client/lit/custom-components-example \
                                               /app/samples/client/lit/custom-components-example
@@ -31,12 +37,15 @@ RUN sed -i "s|http://localhost:10002|${PUBLIC_AGENT_URL}|g" \
     /app/samples/client/lit/shell/configs/restaurant.ts \
     && grep -n "serverUrl" /app/samples/client/lit/shell/configs/restaurant.ts
 
+# Install workspace deps once at the lit/ root so both shell AND
+# custom-components-example get hoisted node_modules (lit, @lit/*, etc).
+WORKDIR /app/samples/client/lit
+RUN npm install --no-audit --no-fund --legacy-peer-deps
+
 # Build the shell. The upstream package.json's "build" script runs tsc only,
 # so we explicitly invoke vite build after to produce a static bundle.
 WORKDIR /app/samples/client/lit/shell
-RUN npm install --no-audit --no-fund --legacy-peer-deps \
-    && npx tsc -b \
-    && npx vite build
+RUN npx tsc -b && npx vite build
 
 # Runtime stage: nginx serving the static dist.
 FROM nginx:alpine AS runner

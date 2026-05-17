@@ -1,0 +1,55 @@
+# Public-facing a2ui-free.alkenacode.dev stack.
+# Lit shell client on 4904, Python A2A agent on 4905.
+# Host nginx fronts both with TLS; / -> client, /agent/ -> agent.
+
+services:
+  client:
+    build:
+      context: ..
+      dockerfile: site/client/Dockerfile
+      args:
+        # Overridden in production via .env (PUBLIC_AGENT_URL=).
+        PUBLIC_AGENT_URL: ${PUBLIC_AGENT_URL:-https://a2ui-free.alkenacode.dev/agent}
+    container_name: a2ui_free_client
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4904:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  agent:
+    build:
+      context: ..
+      dockerfile: site/agent/Dockerfile
+    container_name: a2ui_free_agent
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4905:10002"
+    environment:
+      # Recommended A2UI config verified against restaurant_finder.
+      LLM_MODEL: ${LLM_MODEL:-hybrid/synthesize-best}
+      TOOL_MODEL: ${TOOL_MODEL:-nvidia/meta/llama-3.3-70b-instruct}
+      COUNCIL_JUDGE: ${COUNCIL_JUDGE:-nvidia/meta/llama-3.3-70b-instruct}
+      COUNCIL_SIZE: ${COUNCIL_SIZE:-3}
+      COUNCIL_PROVIDERS: ${COUNCIL_PROVIDERS:-nvidia,groq,cerebras,mistral}
+      # Public-facing URL the agent card will advertise.
+      PUBLIC_URL: ${PUBLIC_URL:-https://a2ui-free.alkenacode.dev/agent}
+      CORS_ORIGIN: ${CORS_ORIGIN:-^https://a2ui-free\.alkenacode\.dev$$}
+      # Free-tier provider keys. Read from site/.env at deploy time.
+      GOOGLE_AI_KEY: ${GOOGLE_AI_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_TOKEN: ${CLOUDFLARE_AI_TOKEN:-}
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:10002/.well-known/agent-card.json',timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

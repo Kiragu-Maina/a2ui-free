@@ -324,38 +324,71 @@ class CouncilLlm(BaseLlm):
     async def _synthesize(
         self, original: LlmRequest, candidates: List[LlmResponse]
     ) -> LlmResponse:
-        """Ask the judge to merge candidate responses into one."""
+        """Ask the judge to merge candidate responses into one.
+
+        The judge needs to know the OUTPUT FORMAT the caller expects (e.g.
+        A2UI requires `{version, createSurface}` / `{version, updateComponents}`
+        envelopes, not raw data). We pass through the original system
+        instructions so the judge has full context, plus an explicit
+        A2UI-shape synthesis directive.
+        """
         from google.genai import types as genai_types
 
         rendered = "\n\n".join(
             f"--- Candidate {i + 1} ---\n{_text_of(c)}"
             for i, c in enumerate(candidates)
         )
+        system_text = _extract_system_text(original)
+
         prompt = (
             f"You are a quality judge. Below are {len(candidates)} candidate "
-            "responses to the same prompt. Synthesize them into a single best "
-            "response that combines the strongest elements.\n\n"
+            "responses to the same prompt, produced by different models. Your "
+            "job is to merge them into a SINGLE best response that fully "
+            "satisfies the ORIGINAL system instructions (shown above as the "
+            "system message of this conversation).\n\n"
             "CRITICAL FORMAT RULES:\n"
-            "- Preserve the EXACT output format used by the candidates, "
-            "including any wrapping tags (e.g. <a2ui-json>...</a2ui-json>), "
-            "code fences, JSON structure, or other markers.\n"
-            "- If candidates wrap content in tags or fences, your synthesized "
-            "response MUST use the same wrapping.\n"
+            "- Re-read the original system instructions carefully. The output "
+            "MUST exactly match the schema/format/structure those instructions "
+            "specify. If candidates emit raw data that does NOT match that "
+            "schema, you MUST wrap/restructure the data into the correct shape.\n"
+            "- For A2UI content specifically: the output MUST be a JSON ARRAY "
+            "of A2UI v0.9 message envelopes such as "
+            "`{\"version\":\"v0.9\",\"createSurface\":{...}}` and "
+            "`{\"version\":\"v0.9\",\"updateComponents\":{...}}` "
+            "(or updateDataModel, deleteSurface, etc.), NOT raw business "
+            "objects like restaurants or users. Wrap any raw data candidates "
+            "produced inside an `updateDataModel` or `updateComponents` "
+            "envelope.\n"
+            "- A2UI output MUST be wrapped in literal `<a2ui-json>` and "
+            "`</a2ui-json>` HTML-style tags. Do NOT use markdown code fences "
+            "(```a2ui-json or ```json) for A2UI content.\n"
             "- Do NOT add a preamble, explanation, or any text outside the "
             "synthesized response itself.\n"
             "- Do NOT emit visible reasoning tokens or chain-of-thought.\n\n"
+            "CANDIDATES TO SYNTHESIZE:\n"
             + rendered
         )
 
-        # Build a fresh LlmRequest for the judge from the original (preserves
-        # config defaults) and replace contents + model. We deliberately drop
-        # the original tools so the judge produces plain text.
+        # Build the judge request: keep original system instructions, replace
+        # the user-turn contents with our synthesis prompt, drop tools (judge
+        # generates text only, no further tool calls).
         judge_request = _request_with_model(original, self._judge.model)
-        judge_request.contents = [
+        judge_contents = []
+        if system_text:
+            judge_contents.append(
+                genai_types.Content(
+                    role="user",
+                    parts=[genai_types.Part.from_text(
+                        text=f"[SYSTEM INSTRUCTIONS the candidates were responding to]\n\n{system_text}"
+                    )],
+                )
+            )
+        judge_contents.append(
             genai_types.Content(
                 role="user", parts=[genai_types.Part.from_text(text=prompt)]
             )
-        ]
+        )
+        judge_request.contents = judge_contents
         if hasattr(judge_request, "tools"):
             try:
                 judge_request.tools = []
@@ -365,8 +398,8 @@ class CouncilLlm(BaseLlm):
         verdict = await self._call_child(self._judge, judge_request, role="judge")
         if verdict is None or _is_error(verdict):
             logger.warning("Judge failed; returning first surviving candidate")
-            return candidates[0]
-        return verdict
+            return _apply_a2ui_normalize(candidates[0])
+        return _apply_a2ui_normalize(verdict)
 
 
 # --- module-level helpers ----------------------------------------------------
@@ -389,6 +422,37 @@ def _request_with_model(req: LlmRequest, model: str) -> LlmRequest:
         return clone
 
 
+def _extract_system_text(req: LlmRequest) -> str:
+    """Pull the system prompt out of an LlmRequest across ADK variants.
+
+    Newer ADK stores system instructions in `.config.system_instruction`;
+    older ADK threads them through `.contents[*]` with role=system. We check
+    both so the judge always sees the same context the council children saw.
+    """
+    try:
+        cfg = getattr(req, "config", None)
+        if cfg is not None:
+            si = getattr(cfg, "system_instruction", None)
+            if si:
+                if isinstance(si, str):
+                    return si
+                parts = getattr(si, "parts", None) or []
+                txt = "\n".join(getattr(p, "text", "") or "" for p in parts)
+                if txt.strip():
+                    return txt
+    except Exception:
+        pass
+
+    pieces = []
+    for content in getattr(req, "contents", []) or []:
+        if getattr(content, "role", "") == "system":
+            for p in getattr(content, "parts", []) or []:
+                t = getattr(p, "text", "") or ""
+                if t:
+                    pieces.append(t)
+    return "\n".join(pieces).strip()
+
+
 def _is_error(resp: LlmResponse) -> bool:
     return bool(getattr(resp, "error_code", None))
 
@@ -408,45 +472,132 @@ def _text_of(resp: LlmResponse) -> str:
     return ""
 
 
-# Free-tier models frequently emit A2UI payloads wrapped in markdown code
-# fences (```a2ui-json\n...\n```) instead of the literal <a2ui-json> tags the
-# upstream A2UI parser expects. Match a2ui-json / a2uijson / a2ui_json,
-# case-insensitive, with the language tag on the opening fence line and the
-# closing fence on its own line. The literal \n before the closing ``` is
-# load-bearing: without it, a triple-backtick inside a JSON string value
-# would close the fence mid-content. [^\S\n]* is horizontal whitespace only
-# so a stray ``` on a line by itself can't be claimed as the opening fence
-# of an a2ui-json block.
+# Free-tier models wrap A2UI JSON inconsistently and frequently emit raw
+# data objects alongside (or instead of) valid A2UI v0.9 envelopes. The
+# helpers below normalize both: rewrite markdown fences to <a2ui-json> tags
+# and strip non-envelope objects so the streaming parser doesn't die on the
+# first stray restaurant/user object.
+#
+# Explicit A2UI fence: ```a2ui-json (or a2uijson / a2ui_json / a2uianything)
+# Generic JSON fence:  ```json or bare ``` -- only rewritten if the body
+# looks like an A2UI envelope (avoid hijacking unrelated code samples).
 _A2UI_FENCE_RE = re.compile(
-    r"```[^\S\n]*a2ui[-_]?json[^\S\n]*\n(.*?)\n[^\S\n]*```",
-    re.DOTALL | re.IGNORECASE,
+    r"```\s*a2ui[a-z_-]*\s*\n(.*?)\n```",
+    re.IGNORECASE | re.DOTALL,
+)
+_GENERIC_FENCE_RE = re.compile(
+    r"```\s*(?:json)?\s*\n(.*?)\n```",
+    re.IGNORECASE | re.DOTALL,
+)
+# A2UI v0.9 envelope: "version" plus one of the known message-type keys.
+_A2UI_SHAPE_RE = re.compile(
+    r'"version"\s*:\s*"v0\.[0-9]+"[\s\S]*'
+    r'"(createSurface|updateComponents|updateDataModel|deleteSurface|appendComponents|removeComponents|patchComponent|navigate|invokeMethod|setSurfaceState|toast|dismissToast)"',
+    re.IGNORECASE,
+)
+_A2UI_MESSAGE_TYPES = {
+    "createSurface", "updateComponents", "updateDataModel", "deleteSurface",
+    "appendComponents", "removeComponents", "patchComponent", "navigate",
+    "invokeMethod", "setSurfaceState", "toast", "dismissToast",
+}
+# Already-tagged A2UI block; used to re-enter and filter its contents.
+_A2UI_TAG_RE = re.compile(
+    r"<a2ui-json>\s*(.*?)\s*</a2ui-json>", re.DOTALL | re.IGNORECASE
 )
 
 
-def _apply_a2ui_normalize(resp: LlmResponse) -> LlmResponse:
-    """Rewrite ```a2ui-json``` markdown fences to <a2ui-json> tags in place.
+def _is_a2ui_envelope(obj) -> bool:
+    return (
+        isinstance(obj, dict)
+        and "version" in obj
+        and any(k in _A2UI_MESSAGE_TYPES for k in obj.keys())
+    )
 
-    Returns the same LlmResponse instance so callers can chain. Mutates
-    `resp.content.parts[i].text` directly, matching the in-place pattern used
-    by HybridToolCouncilLlm._strip_function_calls. If the response has no
-    parts, no text, or no fence match, the response is returned unchanged.
+
+def _filter_a2ui_block(body: str) -> str:
+    """Drop non-envelope objects from an <a2ui-json> block body.
+
+    Free council members sometimes interleave raw data objects (a restaurant,
+    a user record) with valid A2UI envelopes. The streaming validator dies
+    on the first non-envelope; filter them first so the parser only sees
+    envelopes.
+    """
+    import json as _json
+    try:
+        parsed = _json.loads(body)
+    except _json.JSONDecodeError:
+        return body  # not parseable; let the downstream validator complain
+    if isinstance(parsed, dict):
+        if _is_a2ui_envelope(parsed):
+            return body
+        logger.warning(
+            "council a2ui filter: top-level dict is not an envelope, replacing with []"
+        )
+        return "[]"
+    if isinstance(parsed, list):
+        kept = [o for o in parsed if _is_a2ui_envelope(o)]
+        if len(kept) == len(parsed):
+            return body
+        logger.info(
+            "council a2ui filter: dropped %d non-envelope objects (kept %d of %d)",
+            len(parsed) - len(kept),
+            len(kept),
+            len(parsed),
+        )
+        return _json.dumps(kept, indent=2)
+    return body
+
+
+def _normalize_a2ui_format(text: str) -> str:
+    """Rewrite markdown fences to <a2ui-json> tags, then envelope-filter.
+
+    Step 1: ```a2ui-json...``` -> <a2ui-json>...</a2ui-json> (always).
+    Step 2: ```json...``` / bare ```...``` -> <a2ui-json>...</a2ui-json>
+            ONLY if the body looks like an A2UI envelope (else leave alone).
+    Step 3: Inside every <a2ui-json> block, drop objects that aren't valid
+            v0.9 envelopes.
+    """
+    if not text:
+        return text
+    text = _A2UI_FENCE_RE.sub(
+        lambda m: f"<a2ui-json>\n{m.group(1).strip()}\n</a2ui-json>",
+        text,
+    )
+    def _maybe_a2ui(m):
+        body = m.group(1).strip()
+        return (
+            f"<a2ui-json>\n{body}\n</a2ui-json>"
+            if _A2UI_SHAPE_RE.search(body)
+            else m.group(0)
+        )
+    text = _GENERIC_FENCE_RE.sub(_maybe_a2ui, text)
+    text = _A2UI_TAG_RE.sub(
+        lambda m: f"<a2ui-json>\n{_filter_a2ui_block(m.group(1))}\n</a2ui-json>",
+        text,
+    )
+    return text
+
+
+def _apply_a2ui_normalize(resp: LlmResponse) -> LlmResponse:
+    """Walk a response's text parts and normalize A2UI markdown / envelopes.
+
+    Mutates `resp.content.parts[i].text` in place, matching the existing
+    in-place pattern used by HybridToolCouncilLlm._strip_function_calls.
+    Returns the same response so callers can chain.
     """
     try:
-        parts = resp.content.parts  # type: ignore[union-attr]
-    except AttributeError:
-        return resp
-    if not parts:
-        return resp
-    for p in parts:
-        text = getattr(p, "text", None)
-        if not text or "a2ui" not in text.lower():
-            continue
-        new_text = _A2UI_FENCE_RE.sub(r"<a2ui-json>\1</a2ui-json>", text)
-        if new_text != text:
-            try:
-                p.text = new_text
-            except Exception as exc:
-                logger.debug("a2ui_normalize: could not mutate part text: %s", exc)
+        content = getattr(resp, "content", None)
+        if not content:
+            return resp
+        parts = getattr(content, "parts", None) or []
+        for p in parts:
+            txt = getattr(p, "text", None)
+            if txt and "a2ui" in txt.lower():
+                new = _normalize_a2ui_format(txt)
+                if new != txt:
+                    p.text = new
+    except Exception as exc:
+        logger.debug("a2ui normalize: %s", exc)
     return resp
 
 

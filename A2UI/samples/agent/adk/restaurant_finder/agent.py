@@ -212,7 +212,7 @@ class RestaurantAgent:
       session.state["base_url"] = self.base_url
 
     # --- Begin: UI Validation and Retry Logic ---
-    max_retries = 1  # Total 2 attempts
+    max_retries = 3  # Total 4 attempts (small free models often need more swings to nail a templated List)
     attempt = 0
     current_query_text = query
 

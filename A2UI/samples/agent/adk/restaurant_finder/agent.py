@@ -69,7 +69,9 @@ class RestaurantAgent:
 
   def __init__(self, base_url: str):
     self.base_url = base_url
-    self._agent_name = "Restaurant Agent"
+    # ADK >=1.34 rejects spaces in app_name; runner gets this verbatim.
+    # AgentCard.name (line ~130) is the user-facing string and keeps its space.
+    self._agent_name = "RestaurantAgent"
     self._user_id = "remote_agent"
     self._text_runner: Optional[Runner] = self._build_runner(self._build_llm_agent())
 

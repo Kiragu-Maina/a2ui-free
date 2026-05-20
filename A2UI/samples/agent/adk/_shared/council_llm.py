@@ -410,11 +410,15 @@ def _text_of(resp: LlmResponse) -> str:
 
 # Free-tier models frequently emit A2UI payloads wrapped in markdown code
 # fences (```a2ui-json\n...\n```) instead of the literal <a2ui-json> tags the
-# upstream A2UI parser expects. Match a2ui-json / a2uijson / a2ui_json with
-# optional surrounding whitespace; non-greedy body so multi-block responses
-# are rewritten one fence at a time.
+# upstream A2UI parser expects. Match a2ui-json / a2uijson / a2ui_json,
+# case-insensitive, with the language tag on the opening fence line and the
+# closing fence on its own line. The literal \n before the closing ``` is
+# load-bearing: without it, a triple-backtick inside a JSON string value
+# would close the fence mid-content. [^\S\n]* is horizontal whitespace only
+# so a stray ``` on a line by itself can't be claimed as the opening fence
+# of an a2ui-json block.
 _A2UI_FENCE_RE = re.compile(
-    r"```\s*a2ui[-_]?json\s*\n?(.*?)\n?\s*```",
+    r"```[^\S\n]*a2ui[-_]?json[^\S\n]*\n(.*?)\n[^\S\n]*```",
     re.DOTALL | re.IGNORECASE,
 )
 

@@ -38,8 +38,12 @@ COPY site/agent/start.py /app/A2UI/samples/agent/adk/restaurant_finder/start.py
 # Install dependencies. uv sync respects pyproject.toml + uses the editable
 # a2ui-agent-sdk path source defined in the upstream pyproject.toml.
 # Extra deps the public launcher needs explicitly:
+#  - python-dotenv, uvicorn: the launcher's own runtime
+#  - 'a2a-sdk[http-server]': a2a-sdk >=0.4 gates starlette + sse-starlette
+#    behind the http-server extra; without it A2AStarletteApplication
+#    fails at import time. Older 0.3.x pulled them transitively.
 RUN uv sync --no-dev \
-    && uv pip install python-dotenv uvicorn
+    && uv pip install python-dotenv uvicorn 'a2a-sdk[http-server]'
 
 EXPOSE 10002
 

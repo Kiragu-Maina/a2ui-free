@@ -30,6 +30,14 @@ const PROVIDERS: Record<string, ProviderInfo> = {
     label: "NVIDIA NIM",
     tagline: "Perpetual free tier, 131k context",
   },
+  // litellm routes NVIDIA NIM through its OpenAI-compatible adapter, so
+  // model ids come back to the client prefixed `openai/` even though the
+  // underlying provider is NIM. Map to the same label so the UI doesn't
+  // say "Unknown provider".
+  openai: {
+    label: "NVIDIA NIM",
+    tagline: "Perpetual free tier, 131k context (via OpenAI-compat)",
+  },
   cloudflare: {
     label: "Cloudflare Workers AI",
     tagline: "Models on Cloudflare's edge",

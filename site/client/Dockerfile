@@ -1,54 +1,52 @@
-# Lit shell client (Vite + the A2UI web renderers)
-# Build context: repo root.
+# Custom Lit shell for a2ui-free.alkenacode.dev. Two stages:
+# 1. builder: build the @a2ui/web_core, @a2ui/markdown-it, @a2ui/lit renderers
+#    then build the site/client/ Vite app that depends on them via file: deps.
+# 2. runner: nginx:alpine serving the static dist + the SSE-friendly conf.
+#
+# Build context: repo root (..). The upstream A2UI/samples/client/lit/shell
+# tree is no longer consumed.
 FROM node:20-slim AS builder
 
 WORKDIR /app
 
-# Workspace deps: shell -> @a2ui/lit -> @a2ui/web_core / markdown-it.
-# Preserving the relative path layout so the file:../../ specifiers in
-# package.json resolve without sed. The lit samples ship as an npm workspace
-# (package.json with workspaces: [custom-components-example, shell]) so we
-# copy the workspace root + both sibling packages and run npm install once
-# at the root; shell's imports from custom-components-example/ resolve via
-# the hoisted node_modules tree.
-COPY A2UI/renderers                            /app/renderers
-COPY A2UI/samples/client/lit/package.json      /app/samples/client/lit/package.json
-COPY A2UI/samples/client/lit/package-lock.json /app/samples/client/lit/package-lock.json
-COPY A2UI/samples/client/lit/shell             /app/samples/client/lit/shell
-COPY A2UI/samples/client/lit/custom-components-example \
-                                              /app/samples/client/lit/custom-components-example
-COPY A2UI/specification                        /app/specification
+# Renderer packages + their schema dependency. file: paths in
+# site/client/package.json resolve to /app/A2UI/renderers/... so we keep
+# the upstream layout intact below /app/A2UI/.
+COPY A2UI/renderers      /app/A2UI/renderers
+COPY A2UI/specification  /app/A2UI/specification
 
-# Build renderers in the order the upstream Quickstart prescribes:
-RUN cd /app/renderers/web_core \
+# Build renderers in the order the upstream Quickstart documents. Each
+# package's dist/ must exist before site/client npm install can resolve
+# its file: deps to a real entry point.
+RUN cd /app/A2UI/renderers/web_core \
     && npm install --no-audit --no-fund --legacy-peer-deps \
     && npm run build
-RUN cd /app/renderers/markdown/markdown-it \
+RUN cd /app/A2UI/renderers/markdown/markdown-it \
     && npm install --no-audit --no-fund --legacy-peer-deps \
     && npm run build
-RUN cd /app/renderers/lit \
+RUN cd /app/A2UI/renderers/lit \
     && npm install --no-audit --no-fund --legacy-peer-deps \
     && npm run build
 
-# Point the shell at the public agent endpoint. Build-arg so the same image
-# code can be retargeted (staging vs prod) without editing source.
-ARG PUBLIC_AGENT_URL=https://a2ui-free.alkenacode.dev/agent
-RUN sed -i "s|http://localhost:10002|${PUBLIC_AGENT_URL}|g" \
-    /app/samples/client/lit/shell/configs/restaurant.ts \
-    && grep -n "serverUrl" /app/samples/client/lit/shell/configs/restaurant.ts
+# Strip prepack scripts from renderer package.jsons so site/client's
+# `npm install` does NOT re-run their wireit builds (devDeps aren't
+# installed at the file: dep boundary, so the rebuild would fail anyway).
+# We already have valid dist/ output from the explicit builds above.
+RUN for pkg in /app/A2UI/renderers/web_core /app/A2UI/renderers/markdown/markdown-it /app/A2UI/renderers/lit; do \
+        if [ -f "$pkg/package.json" ]; then \
+            sed -i '/"prepack":/d' "$pkg/package.json"; \
+        fi; \
+    done
 
-# Install workspace deps once at the lit/ root so both shell AND
-# custom-components-example get hoisted node_modules (lit, @lit/*, etc).
-WORKDIR /app/samples/client/lit
-RUN npm install --no-audit --no-fund --legacy-peer-deps
-
-# Build the shell. The upstream package.json's "build" script runs tsc only,
-# so we explicitly invoke vite build after to produce a static bundle.
-WORKDIR /app/samples/client/lit/shell
-RUN npx tsc -b && npx vite build
+# Custom site/client app. Copied AFTER the renderer builds so a tweak in
+# src/ doesn't bust the slow renderer install cache.
+COPY site/client /app/site/client
+WORKDIR /app/site/client
+RUN npm install --no-audit --no-fund --legacy-peer-deps \
+    && npm run build
 
 # Runtime stage: nginx serving the static dist.
 FROM nginx:alpine AS runner
-COPY --from=builder /app/samples/client/lit/shell/dist /usr/share/nginx/html
+COPY --from=builder /app/site/client/dist /usr/share/nginx/html
 COPY site/client/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2UI free | watch 3 free AIs build a UI, live</title>
+    <meta
+      name="description"
+      content="A live demo of Google's A2UI agent UI protocol running on a council of free LLMs: Cerebras, Groq, Mistral, NVIDIA NIM. Watch the orchestration in real time."
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Page-level palette only. The A2UI renderer reads --a2ui-* variables;
+         those have safe defaults baked into the renderer so we leave them. */
+      :root {
+        color-scheme: light dark;
+        --bg: #faf8f3;
+        --bg-raised: #ffffff;
+        --ink: #1c1c1c;
+        --ink-soft: #3a3a3a;
+        --ink-mute: #6b6b6b;
+        --rule: #e2dfd6;
+        --signal: #c97b29;
+        --signal-soft: #f5e7d6;
+        --ok: #2e7d57;
+        --err: #b04545;
+        --font-sans: "Inter", system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1a1816;
+          --bg-raised: #25221f;
+          --ink: #f0ede6;
+          --ink-soft: #c9c4ba;
+          --ink-mute: #8a857c;
+          --rule: #3a352f;
+          --signal: #e09850;
+          --signal-soft: #3a2c1c;
+          --ok: #5fb487;
+          --err: #d97070;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        min-height: 100vh;
+      }
+      body {
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+    </style>
+  </head>
+  <body>
+    <a2ui-free-app></a2ui-free-app>
+    <script type="module" src="/src/app.ts"></script>
+  </body>
+</html>

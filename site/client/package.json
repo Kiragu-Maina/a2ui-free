@@ -1,0 +1,26 @@
+{
+  "name": "@alkenacode/a2ui-free-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Custom Lit front-end for a2ui-free.alkenacode.dev. Side-by-side rendered A2UI surface + live council activity panel.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.4",
+    "@a2ui/lit": "file:../../A2UI/renderers/lit",
+    "@a2ui/markdown-it": "file:../../A2UI/renderers/markdown/markdown-it",
+    "@a2ui/web_core": "file:../../A2UI/renderers/web_core",
+    "@lit-labs/signals": "^0.1.3",
+    "@lit/context": "^1.1.4",
+    "lit": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.1",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.11"
+  }
+}

@@ -7,9 +7,6 @@ services:
     build:
       context: ..
       dockerfile: site/client/Dockerfile
-      args:
-        # Overridden in production via .env (PUBLIC_AGENT_URL=).
-        PUBLIC_AGENT_URL: ${PUBLIC_AGENT_URL:-https://a2ui-free.alkenacode.dev/agent}
     container_name: a2ui_free_client
     restart: unless-stopped
     ports:

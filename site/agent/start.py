@@ -14,6 +14,8 @@ Working directory must be the restaurant_finder folder so that relative paths
 to restaurant_data.json and images/ resolve correctly.
 """
 
+import asyncio
+import json
 import logging
 import os
 import sys
@@ -24,6 +26,9 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import StreamingResponse, JSONResponse
+from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
 load_dotenv()
@@ -42,8 +47,61 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import the agent after env munging so the model_factory sees LLM_MODEL.
+# Council telemetry bus is imported here so the SSE route below subscribes
+# to the same singleton the council code publishes to.
+import pathlib
+sys.path.insert(
+    0,
+    str(pathlib.Path(__file__).resolve().parent.parent / "_shared"),
+)
+from council_telemetry import BUS as _TELEMETRY_BUS  # noqa: E402
 from agent import RestaurantAgent  # noqa: E402
 from agent_executor import RestaurantAgentExecutor  # noqa: E402
+
+
+async def _council_stream(request: Request) -> StreamingResponse:
+    """SSE endpoint: streams council activity events as they're published.
+
+    Newly-connected client receives the last ~50 events from the ring buffer
+    (so a chip-click that races the EventSource connection is still narrated)
+    then live events thereafter. Disconnect unsubscribes; queue is GC'd.
+    """
+
+    async def event_source():
+        queue = await _TELEMETRY_BUS.subscribe()
+        try:
+            # Catch-up tail. Lets a client that subscribes a tick late still
+            # see the events that just fired.
+            for past in _TELEMETRY_BUS.recent(limit=50):
+                yield f"data: {json.dumps(past)}\n\n"
+            # Heartbeat every 15s so corporate proxies don't close the
+            # connection between bursts of events.
+            while True:
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                if await request.is_disconnected():
+                    break
+        finally:
+            await _TELEMETRY_BUS.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            # nginx-specific: tell upstream "don't buffer this proxy".
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _council_recent(request: Request) -> JSONResponse:
+    """Convenience JSON endpoint for the ring tail (used by health probes)."""
+    return JSONResponse({"events": _TELEMETRY_BUS.recent(limit=50)})
 
 
 def main() -> None:
@@ -76,6 +134,10 @@ def main() -> None:
         allow_headers=["*"],
     )
     app.mount("/static", StaticFiles(directory="images"), name="static")
+    # Live council telemetry. /council-stream is an SSE feed; /council-recent
+    # is a JSON snapshot of the ring buffer for debug/probe use.
+    app.router.routes.append(Route("/council-stream", _council_stream, methods=["GET"]))
+    app.router.routes.append(Route("/council-recent", _council_recent, methods=["GET"]))
 
     uvicorn.run(app, host=listen_host, port=listen_port)
 

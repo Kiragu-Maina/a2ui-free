@@ -394,6 +394,44 @@ def _text_of(resp: LlmResponse) -> str:
     return ""
 
 
+# Free-tier models frequently emit A2UI payloads wrapped in markdown code
+# fences (```a2ui-json\n...\n```) instead of the literal <a2ui-json> tags the
+# upstream A2UI parser expects. Match a2ui-json / a2uijson / a2ui_json with
+# optional surrounding whitespace; non-greedy body so multi-block responses
+# are rewritten one fence at a time.
+_A2UI_FENCE_RE = re.compile(
+    r"```\s*a2ui[-_]?json\s*\n?(.*?)\n?\s*```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _apply_a2ui_normalize(resp: LlmResponse) -> LlmResponse:
+    """Rewrite ```a2ui-json``` markdown fences to <a2ui-json> tags in place.
+
+    Returns the same LlmResponse instance so callers can chain. Mutates
+    `resp.content.parts[i].text` directly, matching the in-place pattern used
+    by HybridToolCouncilLlm._strip_function_calls. If the response has no
+    parts, no text, or no fence match, the response is returned unchanged.
+    """
+    try:
+        parts = resp.content.parts  # type: ignore[union-attr]
+    except AttributeError:
+        return resp
+    if not parts:
+        return resp
+    for p in parts:
+        text = getattr(p, "text", None)
+        if not text or "a2ui" not in text.lower():
+            continue
+        new_text = _A2UI_FENCE_RE.sub(r"<a2ui-json>\1</a2ui-json>", text)
+        if new_text != text:
+            try:
+                p.text = new_text
+            except Exception as exc:
+                logger.debug("a2ui_normalize: could not mutate part text: %s", exc)
+    return resp
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower().strip())
 

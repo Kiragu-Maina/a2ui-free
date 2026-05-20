@@ -42,6 +42,8 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 
+from council_telemetry import BUS as _TELEMETRY
+
 logger = logging.getLogger(__name__)
 
 VALID_STRATEGIES = {
@@ -129,14 +131,27 @@ class CouncilLlm(BaseLlm):
         self, llm_request: LlmRequest, stream: bool = False
     ) -> AsyncGenerator[LlmResponse, None]:
         strategy = self._strategy
+        member_models = [getattr(c, "model", "?") for c in self._children]
+        _TELEMETRY.publish(
+            "council_started",
+            strategy=strategy,
+            members=member_models,
+            judge=getattr(self._judge, "model", "?"),
+        )
 
         if strategy == "ranked-fallback":
             # Sequential: short-circuit on first non-error response.
             for child in self._children:
                 resp = await self._call_child(child, llm_request)
                 if resp is not None and not _is_error(resp):
+                    _TELEMETRY.publish(
+                        "council_resolved",
+                        strategy=strategy,
+                        winner=getattr(child, "model", "?"),
+                    )
                     yield resp
                     return
+            _TELEMETRY.publish("council_resolved", strategy=strategy, winner=None)
             yield _error("COUNCIL_ALL_FAILED", "All council members errored")
             return
 
@@ -155,8 +170,20 @@ class CouncilLlm(BaseLlm):
                         getattr(child, "model", "?"),
                         attempted,
                     )
+                    _TELEMETRY.publish(
+                        "council_resolved",
+                        strategy=strategy,
+                        winner=getattr(child, "model", "?"),
+                        attempts=attempted,
+                    )
                     yield resp
                     return
+            _TELEMETRY.publish(
+                "council_resolved",
+                strategy=strategy,
+                winner=None,
+                attempts=attempted,
+            )
             yield _error(
                 "COUNCIL_ALL_FAILED",
                 f"Resilient council exhausted {attempted}/{len(self._children)} members "
@@ -173,25 +200,47 @@ class CouncilLlm(BaseLlm):
         successful = [r for r in results if r is not None and not _is_error(r)]
 
         if not successful:
+            _TELEMETRY.publish("council_resolved", strategy=strategy, winner=None)
             yield _error("COUNCIL_ALL_FAILED", "All council members errored")
             return
 
         if strategy == "single-query" or len(successful) == 1:
+            _TELEMETRY.publish(
+                "council_resolved",
+                strategy=strategy,
+                winner=getattr(members[0], "model", "?"),
+            )
             yield successful[0]
             return
 
         if strategy == "majority-vote":
-            yield _pick_majority(successful)
+            picked = _pick_majority(successful)
+            _TELEMETRY.publish(
+                "council_resolved",
+                strategy=strategy,
+                winner=getattr(picked, "model_name", None)
+                or "(majority-vote bucket)",
+            )
+            yield picked
             return
 
         if strategy == "synthesize-best":
-            yield await self._synthesize(llm_request, successful)
+            verdict = await self._synthesize(llm_request, successful)
+            _TELEMETRY.publish(
+                "council_resolved",
+                strategy=strategy,
+                winner=getattr(self._judge, "model", "?"),
+            )
+            yield verdict
             return
 
     # --- internals -----------------------------------------------------------
 
     async def _call_child(
-        self, child: BaseLlm, llm_request: LlmRequest
+        self,
+        child: BaseLlm,
+        llm_request: LlmRequest,
+        role: str = "member",
     ) -> Optional[LlmResponse]:
         """Drain a child's async generator and return the terminal response.
 
@@ -200,24 +249,62 @@ class CouncilLlm(BaseLlm):
         `model` to the child's id; this is safe across parallel children since
         each has its own copy. On rate-limit / 5xx errors the child is
         quarantined for a while so subsequent rounds skip it.
+
+        Publishes telemetry events keyed by `role` ("member" by default, set
+        to "judge" by _synthesize) so the SSE consumer can distinguish judge
+        timings from council-child timings.
         """
         model_id = getattr(child, "model", "?")
         if _is_quarantined(model_id):
+            _TELEMETRY.publish(
+                f"{role}_skipped",
+                model=model_id,
+                reason="quarantined",
+            )
             return None
+        _TELEMETRY.publish(f"{role}_started", model=model_id)
+        started = _time.perf_counter()
         try:
             child_req = _request_with_model(llm_request, child.model)
             final: Optional[LlmResponse] = None
             async for resp in child.generate_content_async(child_req, stream=False):
                 final = resp  # keep the latest yield (terminal in non-stream mode)
+            elapsed_ms = int((_time.perf_counter() - started) * 1000)
             # Quarantine on logical error (e.g. provider returned 429 wrapped in LlmResponse)
             if final is not None and _is_error(final):
                 msg = getattr(final, "error_message", "") or ""
                 _quarantine(model_id, _classify_error_for_quarantine(msg))
+                _TELEMETRY.publish(
+                    f"{role}_error",
+                    model=model_id,
+                    latency_ms=elapsed_ms,
+                    error=msg[:280],
+                )
+            else:
+                # Normalize A2UI markdown fences in candidate responses before
+                # telemetry sees them: free models often use ```a2ui-json```
+                # instead of the <a2ui-json> tags the upstream parser requires,
+                # and the live council panel should show the normalized form.
+                if final is not None:
+                    final = _apply_a2ui_normalize(final)
+                _TELEMETRY.publish(
+                    f"{role}_finished",
+                    model=model_id,
+                    latency_ms=elapsed_ms,
+                    response_snippet=_text_of(final)[:280] if final else "",
+                )
             return final
         except Exception as exc:
+            elapsed_ms = int((_time.perf_counter() - started) * 1000)
             msg = str(exc)
             _quarantine(model_id, _classify_error_for_quarantine(msg))
             logger.warning("Council member %s failed: %s", model_id, msg[:200])
+            _TELEMETRY.publish(
+                f"{role}_error",
+                model=model_id,
+                latency_ms=elapsed_ms,
+                error=msg[:280],
+            )
             return None
 
     async def _synthesize(
@@ -261,7 +348,7 @@ class CouncilLlm(BaseLlm):
             except Exception:
                 pass
 
-        verdict = await self._call_child(self._judge, judge_request)
+        verdict = await self._call_child(self._judge, judge_request, role="judge")
         if verdict is None or _is_error(verdict):
             logger.warning("Judge failed; returning first surviving candidate")
             return candidates[0]
@@ -374,6 +461,11 @@ class HybridToolCouncilLlm(BaseLlm):
             getattr(target, "model", "?"),
             wants_council,
         )
+        _TELEMETRY.publish(
+            "hybrid_route",
+            route="council" if wants_council else "tool",
+            target_model=getattr(target, "model", "?"),
+        )
         # Same fix as CouncilLlm._call_child: LiteLlm reads request.model, not
         # self.model, so we must rewrite the request to the target's model id.
         # CouncilLlm itself does this rewrite internally per child, so when
@@ -384,10 +476,37 @@ class HybridToolCouncilLlm(BaseLlm):
             if isinstance(target, CouncilLlm)
             else _request_with_model(llm_request, target.model)
         )
-        async for resp in target.generate_content_async(forwarded, stream=stream):
-            if wants_council and self._strip:
-                self._strip_function_calls(resp)
-            yield resp
+        # For the tool-turn path (target is a single BaseLlm, not a council)
+        # emit explicit tool_started/tool_finished events so the UI can show
+        # the tool-decision step. Council-turn path lets CouncilLlm publish
+        # its own council_started/member_* events.
+        instrument_single = not isinstance(target, CouncilLlm)
+        tool_started_at = _time.perf_counter() if instrument_single else 0.0
+        if instrument_single:
+            _TELEMETRY.publish("tool_started", model=getattr(target, "model", "?"))
+        final: Optional[LlmResponse] = None
+        try:
+            async for resp in target.generate_content_async(forwarded, stream=stream):
+                if wants_council and self._strip:
+                    self._strip_function_calls(resp)
+                final = resp
+                yield resp
+        except Exception as exc:
+            if instrument_single:
+                _TELEMETRY.publish(
+                    "tool_error",
+                    model=getattr(target, "model", "?"),
+                    latency_ms=int((_time.perf_counter() - tool_started_at) * 1000),
+                    error=str(exc)[:280],
+                )
+            raise
+        if instrument_single:
+            _TELEMETRY.publish(
+                "tool_finished",
+                model=getattr(target, "model", "?"),
+                latency_ms=int((_time.perf_counter() - tool_started_at) * 1000),
+                response_snippet=_text_of(final)[:280] if final else "",
+            )
 
     @staticmethod
     def _has_function_response(request: LlmRequest) -> bool:

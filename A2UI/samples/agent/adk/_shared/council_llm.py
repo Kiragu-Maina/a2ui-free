@@ -197,7 +197,15 @@ class CouncilLlm(BaseLlm):
             *(self._call_child(c, llm_request) for c in members),
             return_exceptions=False,
         )
-        successful = [r for r in results if r is not None and not _is_error(r)]
+        # Keep (child, response) pairs so council_resolved can report the
+        # model that actually produced the surviving / winning response,
+        # not just members[0] which was wrong when 2+ children were called
+        # and a non-first one was the sole survivor.
+        successful_pairs = [
+            (c, r) for c, r in zip(members, results)
+            if r is not None and not _is_error(r)
+        ]
+        successful = [r for _, r in successful_pairs]
 
         if not successful:
             _TELEMETRY.publish("council_resolved", strategy=strategy, winner=None)
@@ -205,21 +213,27 @@ class CouncilLlm(BaseLlm):
             return
 
         if strategy == "single-query" or len(successful) == 1:
+            winning_child, winning_resp = successful_pairs[0]
             _TELEMETRY.publish(
                 "council_resolved",
                 strategy=strategy,
-                winner=getattr(members[0], "model", "?"),
+                winner=getattr(winning_child, "model", "?"),
             )
-            yield successful[0]
+            yield winning_resp
             return
 
         if strategy == "majority-vote":
             picked = _pick_majority(successful)
+            winning_child = next(
+                (c for c, r in successful_pairs if r is picked),
+                None,
+            )
             _TELEMETRY.publish(
                 "council_resolved",
                 strategy=strategy,
-                winner=getattr(picked, "model_name", None)
-                or "(majority-vote bucket)",
+                winner=getattr(winning_child, "model", "?")
+                if winning_child is not None
+                else "(majority-vote bucket)",
             )
             yield picked
             return

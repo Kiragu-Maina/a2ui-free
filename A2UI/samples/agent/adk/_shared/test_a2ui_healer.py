@@ -296,5 +296,68 @@ assert not is_a2ui_envelope([1, 2, 3])
 _pass("is_a2ui_envelope: shape check")
 
 
+# 19. {value: primitive} wrapper -> unwrap to bare primitive.
+bad = json.dumps([{
+    "version": "v0.9",
+    "updateComponents": {"surfaceId": "s", "components": [
+        {"id": "label", "component": "Text", "text": {"value": "Book Now"}},
+        {"id": "icon", "component": "Image", "url": {"value": "https://x/y.png"}},
+        # path binding is NOT a value-wrapper; must stay intact
+        {"id": "binding", "component": "Text", "text": {"path": "/name"}},
+        # multi-key dict with `value` is NOT a value-wrapper either
+        {"id": "multi", "component": "Text", "text": {"value": "x", "extra": "y"}},
+        # numeric and bool primitives unwrap too
+        {"id": "num", "component": "Text", "text": {"value": 42}},
+        {"id": "bool", "component": "Text", "text": {"value": True}},
+    ]},
+}])
+got = json.loads(heal_a2ui_block(bad))
+comps = got[0]["updateComponents"]["components"]
+_eq(next(c for c in comps if c["id"] == "label")["text"], "Book Now",
+    "text: {value: str} -> bare string")
+_eq(next(c for c in comps if c["id"] == "icon")["url"], "https://x/y.png",
+    "url: {value: str} -> bare string")
+_eq(next(c for c in comps if c["id"] == "binding")["text"], {"path": "/name"},
+    "text: {path: ...} preserved")
+multi_text = next(c for c in comps if c["id"] == "multi")["text"]
+assert multi_text == {"value": "x", "extra": "y"}, multi_text
+_eq(next(c for c in comps if c["id"] == "num")["text"], 42,
+    "text: {value: 42} -> bare 42")
+_eq(next(c for c in comps if c["id"] == "bool")["text"], True,
+    "text: {value: true} -> bare true")
+_pass("{value: primitive} wrappers -> unwrap; {path:} and multi-key dicts preserved")
+
+
+# 20. The full user-reported failure: inline children + value-wrappers combined.
+bad = json.dumps([{
+    "version": "v0.9",
+    "updateComponents": {
+        "surfaceId": "default",
+        "components": [{
+            "id": "card-content",
+            "component": "Column",
+            "children": [
+                {"id": "spacer", "component": "Text", "text": {"value": " "}},
+                {"id": "name", "component": "Text", "variant": "h3",
+                 "text": {"path": "name"}},
+                {"id": "book-button", "component": "Button", "child": "book-now"},
+            ],
+        }, {"id": "book-now", "component": "Text", "text": {"value": "Book Now"}}],
+    },
+}])
+got = json.loads(heal_a2ui_block(bad))
+comps = got[0]["updateComponents"]["components"]
+# spacer.text was {value: " "}; should now be bare " "
+spacer = next(c for c in comps if c["id"] == "spacer")
+_eq(spacer["text"], " ", "spacer text unwrapped")
+# name.text was {path: "name"}; should stay {path: "name"}
+name = next(c for c in comps if c["id"] == "name")
+_eq(name["text"], {"path": "name"}, "name text path-binding preserved")
+# book-now.text was {value: "Book Now"}; should be "Book Now"
+book = next(c for c in comps if c["id"] == "book-now")
+_eq(book["text"], "Book Now", "book-now text unwrapped")
+_pass("combined fix: inline children flattened + value-wrappers unwrapped")
+
+
 print(f"\nall {len(PASSED)} tests passed")
 sys.exit(0)

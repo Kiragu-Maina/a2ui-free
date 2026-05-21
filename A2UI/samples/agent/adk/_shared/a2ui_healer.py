@@ -111,6 +111,39 @@ def is_a2ui_envelope(obj) -> bool:
 # Component-tree repair
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _unwrap_value_wrappers(node, counter: list[int] | None = None):
+    """Recursively rewrite `{"value": primitive}` -> primitive.
+
+    Free-tier models routinely wrap text / url / boolean leaves in a
+    `{value: ...}` object where the v0.9 schema expects either a bare
+    primitive or a `{path: ...}` DataBinding -- the `{value: ...}` shape
+    is not in the spec and the validator rejects it. The cascading error
+    message is "'component', 'text' were unexpected" because polymorphic
+    schema matching falls through to a branch that does not declare those
+    fields once `text` itself fails to match DynamicString.
+
+    Only unwraps when the dict has EXACTLY one key `value` and the value
+    is a JSON primitive (string / number / bool / null). Dicts with other
+    keys (like the legitimate `{path: ...}` DataBinding or
+    `{componentId, path}` List template) are left alone.
+
+    Pass `counter=[0]` to receive the number of unwrap operations.
+    """
+    if isinstance(node, dict):
+        if (
+            len(node) == 1
+            and "value" in node
+            and isinstance(node["value"], (str, int, float, bool, type(None)))
+        ):
+            if counter is not None:
+                counter[0] += 1
+            return node["value"]
+        return {k: _unwrap_value_wrappers(v, counter) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_unwrap_value_wrappers(v, counter) for v in node]
+    return node
+
+
 def flatten_components(components: list, notes: list[str] | None = None) -> list:
     """Repair a flat components array for updateComponents / appendComponents.
 
@@ -131,6 +164,7 @@ def flatten_components(components: list, notes: list[str] | None = None) -> list
     dropped_duplicate = 0
     inlined_children = 0
     inlined_child = 0
+    unwrap_counter = [0]
 
     while queue:
         c = queue.pop(0)
@@ -190,6 +224,13 @@ def flatten_components(components: list, notes: list[str] | None = None) -> list
             else:
                 c.pop("child", None)  # strip unreferencable inline def
 
+        # Unwrap `{value: primitive}` wrappers inside the component (text,
+        # url, boolean leaves the model wrapped where the schema wants bare
+        # primitives). Applied per-component so envelope-level
+        # `updateDataModel.value` (which IS supposed to be a free-form data
+        # object) is never accidentally touched.
+        c = _unwrap_value_wrappers(c, unwrap_counter)
+
         flat[cid] = c
         order.append(cid)
 
@@ -204,6 +245,8 @@ def flatten_components(components: list, notes: list[str] | None = None) -> list
             notes.append(f"dropped {dropped_no_id} component(s) without id")
         if dropped_no_type:
             notes.append(f"dropped {dropped_no_type} component(s) without `component` type")
+        if unwrap_counter[0]:
+            notes.append(f"unwrapped {unwrap_counter[0]} {{value: primitive}} wrapper(s)")
 
     return [flat[cid] for cid in order]
 

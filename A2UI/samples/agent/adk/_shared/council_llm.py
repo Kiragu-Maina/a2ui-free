@@ -359,6 +359,17 @@ class CouncilLlm(BaseLlm):
             "objects like restaurants or users. Wrap any raw data candidates "
             "produced inside an `updateDataModel` or `updateComponents` "
             "envelope.\n"
+            "- In an `updateComponents` envelope, `components` is a FLAT "
+            "ARRAY: every component is a separate sibling entry, regardless "
+            "of nesting depth. The `children` field of any component is an "
+            "ARRAY OF STRING IDS that reference siblings by id "
+            "(`\"children\": [\"image\", \"title\", \"body\"]`). NEVER inline "
+            "component definitions inside `children`. Same rule for the "
+            "singular `child` field on Card / Button / etc.: it is a STRING "
+            "ID reference, not an embedded definition. Repeat the id-string "
+            "rule for List's template form too: a List uses "
+            "`children: {\"componentId\": \"my-template-id\", \"path\": "
+            "\"/items\"}` -- the `componentId` is a STRING.\n"
             "- A2UI output MUST be wrapped in literal `<a2ui-json>` and "
             "`</a2ui-json>` HTML-style tags. Do NOT use markdown code fences "
             "(```a2ui-json or ```json) for A2UI content.\n"
@@ -472,118 +483,28 @@ def _text_of(resp: LlmResponse) -> str:
     return ""
 
 
-# Free-tier models wrap A2UI JSON inconsistently and frequently emit raw
-# data objects alongside (or instead of) valid A2UI v0.9 envelopes. The
-# helpers below normalize both: rewrite markdown fences to <a2ui-json> tags
-# and strip non-envelope objects so the streaming parser doesn't die on the
-# first stray restaurant/user object.
-#
-# Explicit A2UI fence: ```a2ui-json (or a2uijson / a2ui_json / a2uianything)
-# Generic JSON fence:  ```json or bare ``` -- only rewritten if the body
-# looks like an A2UI envelope (avoid hijacking unrelated code samples).
-_A2UI_FENCE_RE = re.compile(
-    r"```\s*a2ui[a-z_-]*\s*\n(.*?)\n```",
-    re.IGNORECASE | re.DOTALL,
+# A2UI normalization + envelope/component repair lives in a2ui_healer so
+# the agent's validation-retry loop can use the same repair logic without
+# pulling in the council module. Re-export under the historical names so
+# existing call sites here keep working unchanged.
+from a2ui_healer import (
+    A2UI_MESSAGE_TYPES as _A2UI_MESSAGE_TYPES,
+    flatten_components as _flatten_components,
+    heal_a2ui_block as _filter_a2ui_block,
+    heal_text as _heal_text,
+    is_a2ui_envelope as _is_a2ui_envelope,
+    normalize_a2ui_format as _normalize_a2ui_format,
+    repair_envelope as _repair_envelope,
 )
-_GENERIC_FENCE_RE = re.compile(
-    r"```\s*(?:json)?\s*\n(.*?)\n```",
-    re.IGNORECASE | re.DOTALL,
-)
-# A2UI v0.9 envelope: "version" plus one of the known message-type keys.
-_A2UI_SHAPE_RE = re.compile(
-    r'"version"\s*:\s*"v0\.[0-9]+"[\s\S]*'
-    r'"(createSurface|updateComponents|updateDataModel|deleteSurface|appendComponents|removeComponents|patchComponent|navigate|invokeMethod|setSurfaceState|toast|dismissToast)"',
-    re.IGNORECASE,
-)
-_A2UI_MESSAGE_TYPES = {
-    "createSurface", "updateComponents", "updateDataModel", "deleteSurface",
-    "appendComponents", "removeComponents", "patchComponent", "navigate",
-    "invokeMethod", "setSurfaceState", "toast", "dismissToast",
-}
-# Already-tagged A2UI block; used to re-enter and filter its contents.
-_A2UI_TAG_RE = re.compile(
-    r"<a2ui-json>\s*(.*?)\s*</a2ui-json>", re.DOTALL | re.IGNORECASE
-)
-
-
-def _is_a2ui_envelope(obj) -> bool:
-    return (
-        isinstance(obj, dict)
-        and "version" in obj
-        and any(k in _A2UI_MESSAGE_TYPES for k in obj.keys())
-    )
-
-
-def _filter_a2ui_block(body: str) -> str:
-    """Drop non-envelope objects from an <a2ui-json> block body.
-
-    Free council members sometimes interleave raw data objects (a restaurant,
-    a user record) with valid A2UI envelopes. The streaming validator dies
-    on the first non-envelope; filter them first so the parser only sees
-    envelopes.
-    """
-    import json as _json
-    try:
-        parsed = _json.loads(body)
-    except _json.JSONDecodeError:
-        return body  # not parseable; let the downstream validator complain
-    if isinstance(parsed, dict):
-        if _is_a2ui_envelope(parsed):
-            return body
-        logger.warning(
-            "council a2ui filter: top-level dict is not an envelope, replacing with []"
-        )
-        return "[]"
-    if isinstance(parsed, list):
-        kept = [o for o in parsed if _is_a2ui_envelope(o)]
-        if len(kept) == len(parsed):
-            return body
-        logger.info(
-            "council a2ui filter: dropped %d non-envelope objects (kept %d of %d)",
-            len(parsed) - len(kept),
-            len(kept),
-            len(parsed),
-        )
-        return _json.dumps(kept, indent=2)
-    return body
-
-
-def _normalize_a2ui_format(text: str) -> str:
-    """Rewrite markdown fences to <a2ui-json> tags, then envelope-filter.
-
-    Step 1: ```a2ui-json...``` -> <a2ui-json>...</a2ui-json> (always).
-    Step 2: ```json...``` / bare ```...``` -> <a2ui-json>...</a2ui-json>
-            ONLY if the body looks like an A2UI envelope (else leave alone).
-    Step 3: Inside every <a2ui-json> block, drop objects that aren't valid
-            v0.9 envelopes.
-    """
-    if not text:
-        return text
-    text = _A2UI_FENCE_RE.sub(
-        lambda m: f"<a2ui-json>\n{m.group(1).strip()}\n</a2ui-json>",
-        text,
-    )
-    def _maybe_a2ui(m):
-        body = m.group(1).strip()
-        return (
-            f"<a2ui-json>\n{body}\n</a2ui-json>"
-            if _A2UI_SHAPE_RE.search(body)
-            else m.group(0)
-        )
-    text = _GENERIC_FENCE_RE.sub(_maybe_a2ui, text)
-    text = _A2UI_TAG_RE.sub(
-        lambda m: f"<a2ui-json>\n{_filter_a2ui_block(m.group(1))}\n</a2ui-json>",
-        text,
-    )
-    return text
 
 
 def _apply_a2ui_normalize(resp: LlmResponse) -> LlmResponse:
     """Walk a response's text parts and normalize A2UI markdown / envelopes.
 
-    Mutates `resp.content.parts[i].text` in place, matching the existing
-    in-place pattern used by HybridToolCouncilLlm._strip_function_calls.
-    Returns the same response so callers can chain.
+    Delegates to a2ui_healer.heal_text; mutates `resp.content.parts[i].text`
+    in place, matching the existing in-place pattern used by
+    HybridToolCouncilLlm._strip_function_calls. Returns the same response
+    so callers can chain.
     """
     try:
         content = getattr(resp, "content", None)
@@ -592,10 +513,13 @@ def _apply_a2ui_normalize(resp: LlmResponse) -> LlmResponse:
         parts = getattr(content, "parts", None) or []
         for p in parts:
             txt = getattr(p, "text", None)
-            if txt and "a2ui" in txt.lower():
-                new = _normalize_a2ui_format(txt)
-                if new != txt:
-                    p.text = new
+            if not txt or "a2ui" not in txt.lower():
+                continue
+            new, notes = _heal_text(txt)
+            if new != txt:
+                p.text = new
+                if notes:
+                    logger.info("a2ui heal: %s", "; ".join(notes))
     except Exception as exc:
         logger.debug("a2ui normalize: %s", exc)
     return resp

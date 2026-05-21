@@ -39,6 +39,7 @@ from google.adk.sessions import InMemorySessionService
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "_shared"))
 from model_factory import build_model  # noqa: E402
+from a2ui_healer import heal_text as _heal_text  # noqa: E402
 from google.genai import types
 from prompt_builder import (
     get_text_prompt,
@@ -339,10 +340,49 @@ class RestaurantAgent:
               f"--- RestaurantAgent.stream: A2UI validation failed: {e} (Attempt"
               f" {attempt}) ---"
           )
-          logger.warning(
-              f"--- Failed response content: {final_response_content[:500]}... ---"
-          )
           error_message = f"Validation failed: {e}."
+
+          # Self-healing pass. Free-tier models routinely produce A2UI that
+          # is one regex away from valid -- inline `children: [{...}]` where
+          # the schema wants id strings, raw data objects mixed with
+          # envelopes, multi-message envelopes, duplicate ids. The healer
+          # repairs those in-place; if the repaired text now validates we
+          # ship it without a second council pass.
+          healed, repairs = _heal_text(final_response_content)
+          if repairs and healed != final_response_content:
+            logger.info(
+                "--- RestaurantAgent.stream: self-healing applied: %s ---",
+                "; ".join(repairs),
+            )
+            try:
+              healed_parts = parse_response(healed)
+              for hpart in healed_parts:
+                if not hpart.a2ui_json:
+                  continue
+                selected_catalog.validator.validate(hpart.a2ui_json)
+              # Re-validation passed; treat the healed content as canonical.
+              logger.info(
+                  "--- RestaurantAgent.stream: self-healing produced a valid"
+                  " response on attempt %d; shipping without re-prompt ---",
+                  attempt,
+              )
+              final_response_content = healed
+              is_valid = True
+            except (
+                ValueError,
+                json.JSONDecodeError,
+                jsonschema.exceptions.ValidationError,
+            ) as heal_err:
+              logger.info(
+                  "--- RestaurantAgent.stream: self-healing did not produce a"
+                  " valid response (%s); falling through to retry ---",
+                  heal_err,
+              )
+
+          if not is_valid:
+            logger.warning(
+                f"--- Failed response content: {final_response_content[:500]}... ---"
+            )
 
       else:  # Not using UI, so text is always "valid"
         is_valid = True

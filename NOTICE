@@ -1,0 +1,17 @@
+a2ui-free
+Copyright (c) 2026 Maina Kiragu. MIT License, see LICENSE.
+
+This project includes files from the A2UI project (https://github.com/a2ui-project/a2ui),
+Copyright the A2UI authors, Licensed under the Apache License, Version 2.0:
+
+  src/a2ui_free/schemas/agent_to_renderer.json   specification/v1_0/json/
+  src/a2ui_free/schemas/common_types.json        specification/v1_0/json/
+  src/a2ui_free/schemas/basic_catalog.json       catalogs/basic/v1/catalog.json
+  tests/upstream_cases/*                         specification/v1_0/test/
+
+They are copied unchanged. At load time, validate.py rewrites one identifier
+pattern in memory into a form Python's re module reads. A copy of the Apache
+License 2.0 is in LICENSE-APACHE.
+
+a2ui-free is an independent project. It is not affiliated with or endorsed by the
+A2UI project or Google.

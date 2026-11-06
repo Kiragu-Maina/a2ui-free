@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "a2ui-free"
+version = "1.0.0"
+description = "Generate A2UI v1.0 with any language model, and only ship UI that passed."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Maina Kiragu" }]
+keywords = ["a2ui", "generative-ui", "llm", "agents", "json-schema", "ollama"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: User Interfaces",
+]
+dependencies = ["jsonschema>=4.21"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Repository = "https://github.com/Kiragu-Maina/a2ui-free"
+
+[project.scripts]
+a2ui-free = "a2ui_free.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/a2ui_free"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,5 +1,6 @@
 """Generate A2UI v1.0 with any language model, and only ship UI that passed."""
 
+from .blueprint import expand, generate_from_plan, read_plan
 from .generate import Result, generate, system_prompt, with_data
 from .llm import Chain, LlmError, chain, connect
 from .repair import repair
@@ -12,6 +13,9 @@ __all__ = [
     "Report",
     "Result",
     "basic_catalog",
+    "expand",
+    "generate_from_plan",
+    "read_plan",
     "chain",
     "connect",
     "generate",

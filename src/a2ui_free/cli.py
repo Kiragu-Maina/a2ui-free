@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .bench import TASKS, run, summarise
+from .blueprint import generate_from_plan
 from .generate import generate
 from .llm import LlmError
 from .repair import repair
@@ -31,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     make.add_argument("--model", help="for example ollama/llama3.2:3b, or a comma list")
     make.add_argument("--data", help="JSON file with the data model")
     make.add_argument("--inline", action="store_true", help="show the model the values instead of the paths")
+    make.add_argument("--plan", action="store_true", help="the model writes a small plan and code builds the UI")
     make.add_argument("--attempts", type=int, default=3)
 
     check = commands.add_parser("check", help="validate A2UI JSON from a file or -")
@@ -53,13 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
-            result = generate(
-                args.request,
-                args.model,
-                data=_json(args.data),
-                bound=not args.inline,
-                attempts=args.attempts,
-            )
+            data = _json(args.data)
+            if args.plan:
+                if data is None:
+                    print("--plan needs --data", file=sys.stderr)
+                    return 2
+                result = generate_from_plan(args.request, args.model, data, attempts=args.attempts)
+            else:
+                result = generate(args.request, args.model, data=data, bound=not args.inline, attempts=args.attempts)
             if not result.ok:
                 print(result.error or "no valid UI", file=sys.stderr)
                 print(result.report, file=sys.stderr)

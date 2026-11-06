@@ -1,9 +1,10 @@
 """The experiment: does binding data stop models putting wrong numbers on screen?
 
-Each task is a request plus a data model. Every task runs in two arms:
+Each task is a request plus a data model. Every task runs in three arms:
 
-  inline  the model sees the values and types them into the UI.
-  bound   the model sees only the paths and types, and binds to them.
+  inline     the model sees the values and writes A2UI with them typed in.
+  bound      the model sees only paths and writes A2UI that binds to them.
+  blueprint  the model sees only paths and writes a small plan. Code builds the A2UI.
 
 For each run this records whether the raw reply was valid, whether repair saved
 it, how many attempts it took, and, for the rendered result, every figure the
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .blueprint import generate_from_plan
 from .generate import generate, system_prompt
 from .llm import LlmError, chain
 from .repair import repair
@@ -107,6 +109,7 @@ TASKS: dict[str, tuple[str, dict]] = {
     ),
 }
 
+ARMS = ("inline", "bound", "blueprint")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
@@ -160,19 +163,29 @@ def _shown_values(components: list[dict], model: dict):
                 yield value
 
 
-def figure_errors(messages: list[Any], data: Any) -> tuple[int, int]:
-    """(figures shown, figures shown that are not in the source data)."""
-    shown = wrong = 0
-    truth = source_figures(data)
+def shown_figures(messages: list[Any], data: Any) -> list[str]:
+    """Every figure a reader would see, normalised."""
     model = data_of(messages, data)
+    out: list[str] = []
     for components in components_by_surface(messages).values():
         for value in _shown_values(components, model):
             figures = [str(value)] if isinstance(value, (int, float)) else figures_in(str(value))
-            for figure in figures:
-                shown += 1
-                if _normal(figure) not in truth:
-                    wrong += 1
-    return shown, wrong
+            out.extend(_normal(figure) for figure in figures)
+    return out
+
+
+def figure_errors(messages: list[Any], data: Any) -> tuple[int, int]:
+    """(figures shown, figures shown that are not in the source data)."""
+    truth = source_figures(data)
+    shown = shown_figures(messages, data)
+    return len(shown), sum(figure not in truth for figure in shown)
+
+
+def coverage(messages: list[Any], data: Any) -> float:
+    """The share of the source's figures that reach the screen. A surface can be
+    valid and accurate by showing nothing, so accuracy alone proves little."""
+    truth = source_figures(data)
+    return len(truth & set(shown_figures(messages, data))) / len(truth) if truth else 1.0
 
 
 @dataclass
@@ -190,23 +203,28 @@ class Run:
     issues: list[str]
     figures_shown: int
     figures_wrong: int
+    wrong_figures: list[str]
+    coverage: float
     error: str | None
+    replies: list[str]
 
 
 def one_run(model: str, task: str, arm: str, trial: int, llm: Any = None) -> Run:
     request, data = TASKS[task]
-    bound = arm == "bound"
     started = time.monotonic()
-    result = generate(request, llm or model, data=data, bound=bound, attempts=3)
+    if arm == "blueprint":
+        result = generate_from_plan(request, llm or model, data, attempts=3)
+    else:
+        result = generate(request, llm or model, data=data, bound=arm == "bound", attempts=3)
     seconds = time.monotonic() - started
     first = result.attempts[0] if result.attempts else None
-    shown = wrong = 0
     final = result.messages
-    if not result.ok and result.attempts:
+    if not result.ok and result.attempts and arm != "blueprint":
         # Score what the last attempt would have shown had nothing stopped it.
         final = repair(result.attempts[-1].reply).messages
-    if final:
-        shown, wrong = figure_errors(final, data)
+    truth = source_figures(data)
+    shown = shown_figures(final, data) if final else []
+    wrong = [figure for figure in shown if figure not in truth]
     return Run(
         model,
         task,
@@ -219,9 +237,12 @@ def one_run(model: str, task: str, arm: str, trial: int, llm: Any = None) -> Run
         len(result.attempts),
         first.notes if first else [],
         sorted({i.code for i in result.report.issues}),
-        shown,
+        len(shown),
+        len(wrong),
         wrong,
+        round(coverage(final, data), 3) if final else 0.0,
         result.error,
+        [a.reply for a in result.attempts],
     )
 
 
@@ -236,7 +257,7 @@ def run(models: Iterable[str], trials: int, out: Path, tasks: Iterable[str] | No
         for model in models:
             for trial in range(trials):
                 for task in tasks or TASKS:
-                    for arm in ("inline", "bound"):
+                    for arm in ARMS:
                         if (model, task, arm, trial) in done:
                             continue
                         try:
@@ -270,9 +291,11 @@ def summarise(path: Path) -> dict:
             "figures_shown": shown,
             "figures_wrong": wrong,
             "wrong_rate": wrong / shown if shown else 0,
+            "median_coverage_of_valid": statistics.median([r["coverage"] for r in runs if r["final_valid"]] or [0]),
+            "valid_and_at_least_half_shown": sum(r["final_valid"] and r["coverage"] >= 0.5 for r in runs) / n,
             "median_seconds": statistics.median(r["seconds"] for r in runs),
         }
     return out
 
 
-__all__ = ["TASKS", "figure_errors", "run", "source_figures", "summarise", "one_run", "system_prompt", "validate"]
+__all__ = ["ARMS", "TASKS", "coverage", "figure_errors", "run", "source_figures", "summarise", "one_run", "system_prompt", "validate"]

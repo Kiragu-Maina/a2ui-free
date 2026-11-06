@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from a2ui_free import Chain, LlmError, chain, connect, generate, repair, validate, with_data
-from a2ui_free.bench import TASKS, figure_errors, one_run, source_figures, summarise
+from a2ui_free.bench import TASKS, coverage, figure_errors, one_run, source_figures, summarise
+from a2ui_free.blueprint import expand, generate_from_plan, read_plan
 from a2ui_free.generate import data_shape, system_prompt
 from a2ui_free.llm import FunctionLlm
 from a2ui_free.validate import BASIC_CATALOG_ID, figures_in, resolve_pointer
@@ -409,3 +410,99 @@ class TestBench:
         path: Path = tmp_path / "r.jsonl"
         path.write_text(json.dumps(run.__dict__) + "\n")
         assert summarise(path)["fake | bound"]["after_retry"] == 1
+
+
+class TestBlueprint:
+    DATA = TASKS["invoice"][1]
+    PLAN = {
+        "title": "Invoice",
+        "blocks": [
+            {"heading": "Who it is for"},
+            {"fields": [{"label": "Customer", "path": "/customer"}, {"label": "Total due", "path": "/total"}]},
+            {"table": {"path": "/lines", "columns": [{"label": "Item", "field": "item"}, {"label": "Qty", "field": "qty"}]}},
+        ],
+    }
+
+    def test_a_plan_expands_to_valid_a2ui_that_shows_the_data(self):
+        plan, report = read_plan(self.PLAN, self.DATA)
+        assert report.ok
+        messages = expand(plan)
+        assert validate(messages, data=self.DATA, no_literal_figures=True).ok
+        shown = figure_errors(messages, self.DATA)
+        assert shown[0] > 0 and shown[1] == 0
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            None,
+            5,
+            [],
+            {},
+            {"title": "x"},
+            {"title": "x", "blocks": []},
+            {"title": "x", "blocks": [{"chart": {}}]},
+            {"title": "x", "blocks": [{"fields": [{"label": "a", "path": "/nope"}]}]},
+            {"title": "x", "blocks": [{"fields": [{"label": "a", "path": "/lines"}]}]},
+            {"title": "x", "blocks": [{"fields": [{"label": "Total 500", "path": "/total"}]}]},
+            {"title": "x", "blocks": [{"table": {"path": "/total", "columns": [{"label": "a", "field": "b"}]}}]},
+            {"title": "x", "blocks": [{"table": {"path": "/lines", "columns": [{"label": "a", "field": "nope"}]}}]},
+        ],
+    )
+    def test_bad_plans_are_refused_without_raising(self, bad):
+        plan, report = read_plan(bad, self.DATA)
+        assert plan is None or not report.ok
+
+    def test_a_figure_in_a_heading_is_refused(self):
+        _, report = read_plan({"title": "x", "blocks": [{"heading": "Spent 15,052.65"}]}, self.DATA)
+        assert "figure" in str(report)
+
+    def test_the_model_never_sees_a_value(self):
+        seen = {}
+
+        def model(system, user):
+            seen["all"] = system + user
+            return json.dumps(self.PLAN)
+
+        result = generate_from_plan("show it", model, self.DATA)
+        assert result.ok
+        assert "15052" not in seen["all"] and "Wanjiru" not in seen["all"]
+        assert result.messages[0]["createSurface"]["dataModel"] == self.DATA
+
+    def test_a_refused_plan_is_sent_back(self):
+        replies = iter(['{"title": "x", "blocks": [{"chart": 1}]}', json.dumps(self.PLAN)])
+        result = generate_from_plan("show it", lambda s, u: next(replies), self.DATA)
+        assert result.ok and len(result.attempts) == 2
+
+    def test_it_gives_up_with_nothing(self):
+        result = generate_from_plan("show it", lambda s, u: "no", self.DATA, attempts=2)
+        assert not result.ok and result.messages == []
+
+    def test_any_plan_read_expands_to_valid_a2ui(self):
+        r = random.Random(3)
+        fields = [{"label": "Value", "path": p} for p in ("/customer", "/number", "/tax", "/total")]
+        columns = [{"label": "Col", "field": f} for f in ("item", "qty", "amount")]
+        for _ in range(500):
+            blocks = []
+            for _ in range(r.randint(1, 6)):
+                kind = r.choice(("heading", "fields", "table"))
+                if kind == "heading":
+                    blocks.append({"heading": "Words"})
+                elif kind == "fields":
+                    blocks.append({"fields": r.sample(fields, r.randint(1, 4))})
+                else:
+                    blocks.append({"table": {"path": "/lines", "columns": r.sample(columns, r.randint(1, 3))}})
+            plan, report = read_plan({"title": "T", "blocks": blocks}, self.DATA)
+            assert report.ok
+            assert validate(expand(plan), data=self.DATA, no_literal_figures=True).ok
+
+
+class TestCoverage:
+    def test_a_surface_can_be_accurate_by_showing_nothing(self):
+        data = {"total": 15052.65, "tax": 2076.4}
+        empty = surface([text("root", "Your invoice")])
+        assert figure_errors(empty, data) == (0, 0)
+        assert coverage(empty, data) == 0
+
+    def test_coverage_counts_what_reaches_the_screen(self):
+        data = {"total": 15052.65, "tax": 2076.4}
+        assert coverage(surface([text("root", {"@path": "/total"})]), data) == 0.5

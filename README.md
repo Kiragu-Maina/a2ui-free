@@ -113,7 +113,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/a2ui-free summary results.jsonl
 ```
 
-To cite this, see [CITATION.cff](CITATION.cff).
+The write-up is [Small Models Should Plan the Screen, Not Write It](https://blog.alkenacode.dev/small-models-should-plan-the-screen/). To cite this, see [CITATION.cff](CITATION.cff).
 
 ## Licence
 

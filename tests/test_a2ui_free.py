@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from a2ui_free import Chain, LlmError, chain, connect, generate, repair, validate, with_data
-from a2ui_free.bench import TASKS, coverage, figure_errors, one_run, source_figures, summarise
+from a2ui_free.bench import TASKS, coverage, explain_figure, figure_errors, one_run, source_figures, summarise
 from a2ui_free.blueprint import expand, generate_from_plan, read_plan
 from a2ui_free.generate import data_shape, system_prompt
 from a2ui_free.llm import FunctionLlm
@@ -482,8 +482,8 @@ class TestBlueprint:
         fields = [{"label": "Value", "path": p} for p in ("/customer", "/number", "/tax", "/total")]
         columns = [{"label": "Col", "field": f} for f in ("item", "qty", "amount")]
         for _ in range(500):
-            blocks = []
-            for _ in range(r.randint(1, 6)):
+            blocks = [{"fields": r.sample(fields, 1)}]  # a plan of headings alone is refused
+            for _ in range(r.randint(0, 5)):
                 kind = r.choice(("heading", "fields", "table"))
                 if kind == "heading":
                     blocks.append({"heading": "Words"})
@@ -506,3 +506,46 @@ class TestCoverage:
     def test_coverage_counts_what_reaches_the_screen(self):
         data = {"total": 15052.65, "tax": 2076.4}
         assert coverage(surface([text("root", {"@path": "/total"})]), data) == 0.5
+
+
+# Found by reading benchmark replies: 29 of 258 blocks held more than one part, and
+# everything beside a heading vanished, which left valid screens with no data.
+PLAN_DATA = {"total": 12, "rows": [{"name": "a"}]}
+
+
+def test_a_heading_beside_fields_and_a_table_keeps_all_three():
+    plan, report = read_plan(
+        {
+            "title": "Shop",
+            "blocks": [
+                {
+                    "heading": "Today",
+                    "fields": [{"label": "Total", "path": "/total"}],
+                    "table": {"path": "/rows", "columns": [{"label": "Name", "field": "name"}]},
+                }
+            ],
+        },
+        PLAN_DATA,
+    )
+    assert report.ok, str(report)
+    assert [next(iter(block)) for block in plan.blocks] == ["heading", "fields", "table"]
+
+
+def test_a_field_with_no_path_beside_a_heading_is_refused():
+    _, report = read_plan(
+        {"title": "Shop", "blocks": [{"heading": "Today", "fields": [{"label": "Total"}]}]},
+        PLAN_DATA,
+    )
+    assert not report.ok
+
+
+def test_a_plan_of_headings_alone_is_refused():
+    plan, report = read_plan({"title": "Shop", "blocks": [{"heading": "Today"}]}, PLAN_DATA)
+    assert plan is None
+    assert not report.ok
+
+
+def test_a_correct_gap_is_derived_and_a_slipped_one_is_not():
+    data = {"budget": 48250, "spent": 51377}
+    assert explain_figure("3127", data) == "derived"
+    assert explain_figure("3137", data) == "unsupported"

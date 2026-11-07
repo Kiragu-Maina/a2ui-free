@@ -81,11 +81,17 @@ def read_plan(value: Any, data: Any) -> tuple[Plan | None, Report]:
         where = f"blocks/{i}"
         if not isinstance(block, dict):
             report.add("plan", where, "must be an object")
-        elif "heading" in block:
+            continue
+        parts = [key for key in ("heading", "fields", "table") if key in block]
+        if not parts:
+            report.add("plan", where, "must be a heading, fields or table")
+        # Models often put a heading, fields and a table in one block. Each part
+        # is read on its own, in reading order, so none of it is lost unseen.
+        if "heading" in block:
             words = _text(block["heading"], report, where)
             if words:
                 blocks.append({"heading": words})
-        elif "fields" in block:
+        if "fields" in block:
             items = []
             for j, item in enumerate(block["fields"] if isinstance(block["fields"], list) else []):
                 if not isinstance(item, dict):
@@ -99,7 +105,7 @@ def read_plan(value: Any, data: Any) -> tuple[Plan | None, Report]:
                     items.append({"label": label, "path": path})
             if items:
                 blocks.append({"fields": items[:MAX_ITEMS]})
-        elif "table" in block:
+        if "table" in block:
             table = block["table"] if isinstance(block["table"], dict) else {}
             path = table.get("path")
             found, rows = resolve_pointer(data, path) if isinstance(path, str) else (False, None)
@@ -118,10 +124,11 @@ def read_plan(value: Any, data: Any) -> tuple[Plan | None, Report]:
                     columns.append({"label": label, "field": name})
             if columns:
                 blocks.append({"table": {"path": path, "columns": columns[:MAX_ITEMS]}})
-        else:
-            report.add("plan", where, "must be a heading, fields or table")
     if not blocks:
         report.add("plan", "blocks", "no usable block")
+        return None, report
+    if not any("fields" in block or "table" in block for block in blocks):
+        report.add("plan", "blocks", "shows no data: add fields or a table")
         return None, report
     return Plan(title, blocks), report
 

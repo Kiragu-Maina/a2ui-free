@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .bench import TASKS, run, summarise
+from .bench import ARMS, TASKS, run, summarise
 from .blueprint import generate_from_plan
 from .generate import generate
 from .llm import LlmError
@@ -47,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     bench.add_argument("--models", required=True, help="comma list")
     bench.add_argument("--trials", type=int, default=3)
     bench.add_argument("--tasks", help=f"comma list of {','.join(TASKS)}")
+    bench.add_argument("--arms", help=f"comma list of {','.join(ARMS)}")
     bench.add_argument("--out", default="results.jsonl")
 
     report = commands.add_parser("summary", help="summarise a bench results file")
@@ -83,7 +84,13 @@ def main(argv: list[str] | None = None) -> int:
             for note in fixed.notes:
                 print(f"repaired: {note}", file=sys.stderr)
         elif args.command == "bench":
-            run(args.models.split(","), args.trials, Path(args.out), args.tasks.split(",") if args.tasks else None)
+            run(
+                args.models.split(","),
+                args.trials,
+                Path(args.out),
+                args.tasks.split(",") if args.tasks else None,
+                args.arms.split(",") if args.arms else None,
+            )
         else:
             print(json.dumps(summarise(Path(args.file)), indent=2))
     except (LlmError, OSError, ValueError) as error:

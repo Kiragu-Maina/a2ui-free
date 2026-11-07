@@ -181,6 +181,21 @@ def figure_errors(messages: list[Any], data: Any) -> tuple[int, int]:
     return len(shown), sum(figure not in truth for figure in shown)
 
 
+def explain_figure(figure: str, data: Any) -> str:
+    """Why a figure is not in the source. `figure_errors` counts every figure the
+    source does not hold, but a correct sum and an invented number are different
+    failures. "derived" means it equals the gap between two source figures or the
+    sum of two. Anything else is "unsupported". Only the reader can say whether a
+    derived figure is the one the screen claims it is."""
+    source = [float(f) for f in source_figures(data)]
+    target = float(_normal(figure))
+    for i, a in enumerate(source):
+        for b in source[i + 1 :]:
+            if abs(abs(a - b) - target) < 0.005 or abs(a + b - target) < 0.005:
+                return "derived"
+    return "unsupported"
+
+
 def coverage(messages: list[Any], data: Any) -> float:
     """The share of the source's figures that reach the screen. A surface can be
     valid and accurate by showing nothing, so accuracy alone proves little."""
@@ -246,7 +261,13 @@ def one_run(model: str, task: str, arm: str, trial: int, llm: Any = None) -> Run
     )
 
 
-def run(models: Iterable[str], trials: int, out: Path, tasks: Iterable[str] | None = None) -> None:
+def run(
+    models: Iterable[str],
+    trials: int,
+    out: Path,
+    tasks: Iterable[str] | None = None,
+    arms: Iterable[str] | None = None,
+) -> None:
     """Appends one JSON line per run, so a long run can stop and resume."""
     done = set()
     if out.exists():
@@ -257,7 +278,7 @@ def run(models: Iterable[str], trials: int, out: Path, tasks: Iterable[str] | No
         for model in models:
             for trial in range(trials):
                 for task in tasks or TASKS:
-                    for arm in ARMS:
+                    for arm in arms or ARMS:
                         if (model, task, arm, trial) in done:
                             continue
                         try:
@@ -298,4 +319,4 @@ def summarise(path: Path) -> dict:
     return out
 
 
-__all__ = ["ARMS", "TASKS", "coverage", "figure_errors", "run", "source_figures", "summarise", "one_run", "system_prompt", "validate"]
+__all__ = ["ARMS", "TASKS", "coverage", "explain_figure", "figure_errors", "run", "source_figures", "summarise", "one_run", "system_prompt", "validate"]

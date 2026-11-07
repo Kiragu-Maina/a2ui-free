@@ -12,7 +12,7 @@ Four small local models, six tasks, 144 runs across three ways of asking. A run 
 | --- | --- | --- | --- | --- |
 | **Inline:** sees the values, writes A2UI | 23 of 48 | 17 of 48 | 4 of 186 | 69 |
 | **Bound:** sees paths, writes A2UI | 8 of 48 | 3 of 48 | 0 of 23 | 53 |
-| **Blueprint:** sees paths, writes a small plan, code writes A2UI | 40 of 48 | 39 of 48 | 0 of 336 | 10 |
+| **Blueprint:** sees paths, writes a small plan, pre-written code turns it into A2UI | 40 of 48 | 39 of 48 | 0 of 336 | 10 |
 
 Blueprint was run again after a bug fix, so read [the experiment notes](docs/EXPERIMENT.md) before quoting this. They hold the method, the limits and the false labels this table does not show. Blueprint's zero is guaranteed by construction, so it says nothing about the model's honesty. All raw replies are in `benchmarks/`.
 
@@ -55,7 +55,7 @@ The model sees the paths and never the values. It answers with a plan like this:
    {"table": {"path": "/lines", "columns": [{"label": "Item", "field": "item"}]}}]}
 ```
 
-`read_plan` checks it against your data and never raises. A path that does not exist or a label with a figure in it is refused and sent back to the model. `expand` then builds the components, so the A2UI is valid by construction.
+The model chooses what to show, in what order, and what to call it. It never chooses or writes components. `read_plan` checks the plan against your data and never raises: a path that does not exist, or a label with a figure in it, is refused and sent back to the model. Then `expand`, fixed code written in advance, turns each block into the same components every time. A heading becomes a `Text`. A field becomes a `Row` holding a label and a bound value. A table becomes a header `Row` and a `List` with one templated `Row` per item. The same plan always gives the same A2UI, and that A2UI is valid by construction.
 
 When you need components a plan cannot express, ask for A2UI directly and let the validator decide:
 

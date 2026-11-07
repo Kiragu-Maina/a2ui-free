@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software or its results, please cite it."
+title: "a2ui-free"
+abstract: "Generate A2UI v1.0 with any language model, and only ship UI that passed. Includes a stored benchmark of three ways of asking small local models for a screen."
+type: software
+authors:
+  - family-names: "Maina"
+    given-names: "Kiragu"
+repository-code: "https://github.com/Kiragu-Maina/a2ui-free"
+license: MIT
+version: 1.0.0
+date-released: "2026-11-07"
+keywords:
+  - a2ui
+  - generative-ui
+  - llm
+  - ollama
